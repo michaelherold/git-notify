@@ -1,0 +1,196 @@
+#!/bin/bash
+
+set -euo pipefail
+
+usage() {
+    cat <<USAGE
+usage: git-notify <command> [options] \$GIT_PARAMS
+
+Commands
+
+  since <commit>  show all notifications since commit
+  merge           run on git merge (or pull)
+  rewrite         run on git rebase
+  checkout        run on git checkout or switch
+
+Options
+
+  --prefix, -p    prefix to look for in commit messages (default: "git-notify:")
+  --simple, -s    show a plain, unboxed notification
+  --color,  -c    then color used when displaying the notification (default: "red")
+  --help,   -h    display this help
+
+Examples
+
+  git notify since HEAD~5
+  git notify checkout \$GIT_PARAMS --prefix "\@everyone:"
+  git notify merge \$GIT_PARAMS --simple --color "\#ff6f6f"
+
+USAGE
+
+    exit 1
+}
+
+die () {
+    echo "fatal: $1"
+    exit 1
+}
+
+notify () {
+    local msg="$1" lines border padding
+    declare -a lines=()
+    padding=0
+
+    while IFS='' read -r line || [ -n "$line" ]; do
+        lines+=("$line")
+
+        if [ "$padding" -lt "${#line}" ]; then
+            border="${line//?/═}"
+            padding="${#line}"
+        fi
+    done < <(echo "$msg" | tr -s '\n' ' ' | fold -s -w 60 -)
+
+    [ -z "$COLOR" ] || tput setaf "$COLOR"
+
+    if [ -z "$SIMPLE" ]; then
+        echo "╒═══$border═══╕"
+
+        # shellcheck disable=SC2183
+        printf '│   %*s   │\n' "-$padding"
+
+        for line in "${lines[@]}"; do
+            printf '│   %s%*s%s   │\n' "$(tput sgr 0)" "-$padding" "$line" "$([ -z "$COLOR" ] || tput setaf "$COLOR")"
+        done
+
+        # shellcheck disable=SC2183
+        printf '│   %*s   │\n' "-$padding"
+        echo "╘═══$border═══╛"
+    else
+        for line in "${lines[@]}"; do
+            echo "$line"
+        done
+        echo
+    fi
+
+    tput sgr 0
+}
+
+color_to_code () {
+    declare color="$1" code
+
+    case $color in
+        red)
+            code=1
+            ;;
+        green)
+            code=2
+            ;;
+        yellow)
+            code=3
+            ;;
+        blue)
+            code=4
+            ;;
+        magenta)
+            code=5
+            ;;
+        cyan)
+            code=6
+            ;;
+        white)
+            code=7
+            ;;
+        *)
+            code=
+    esac
+
+    echo "$code"
+}
+
+[ -z "$*" ] && usage
+
+COLOR="red"
+COMMAND=
+PREFIX="git-notify:"
+SIMPLE=
+SINCE=
+
+while [ "$#" -gt 0 ]; do
+    key="$1"
+
+    case $key in
+        -c|--color)
+            COLOR="$2"
+            shift
+            ;;
+        -h|--help)
+            usage
+            ;;
+        -p|--prefix)
+            if [ "$#" -eq 1 ]; then
+                echo "fatal: no prefix given"
+                exit 1
+            fi
+
+            PREFIX="$2"
+            shift
+            ;;
+        -s|--simple)
+            SIMPLE=1
+            ;;
+        merge|rewrite|checkout)
+            COMMAND="$key"
+            ;;
+        since)
+            COMMAND="$key"
+
+            if [ "$#" -eq 1 ]; then
+                echo "fatal: no commit given for since command"
+                exit 1
+            fi
+
+            SINCE="$2"
+            shift
+            ;;
+        *)
+    esac
+
+    shift
+done
+
+if [ -z "$PREFIX" ]; then
+    die "no prefix set"
+fi
+
+case $COMMAND in
+    merge)
+        from="$(git reflog --pretty=format:"%h" --no-patch -1 "HEAD@{1}")"
+        to="HEAD"
+        ;;
+    rewrite)
+        from="origin"
+        to="HEAD"
+        ;;
+    checkout)
+        from="$1"
+        to="$2"
+        ;;
+    since)
+        from="$SINCE"
+        to="HEAD"
+
+        if [ -z "$from" ]; then
+            die "no commit given for since command"
+        fi
+        ;;
+    *)
+        die "unsupported git hook: $COMMAND"
+esac
+
+export -f notify
+
+# shellcheck disable=2016
+git log --pretty="format:%B" "$from..$to" \
+    | awk -v RS='' "/$PREFIX/{ printf(\"%s%c\", \$0, 0) }" \
+    | sed 's/`/\\`/g' \
+    | COLOR="$(color_to_code "$COLOR")" SIMPLE=$SIMPLE xargs -0 -I {} bash -c 'notify "{}"'
